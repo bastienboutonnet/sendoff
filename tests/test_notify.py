@@ -132,6 +132,27 @@ def test_store_dedupe_and_requeue():
         print("ok  store dedupe keyed on (item,email,phase,add_date) + re-queue")
 
 
+def test_dashboard_poster():
+    from sendoff.notify import build_dashboard
+
+    def item(image_path):
+        return ScheduledItem(collection_id=1, collection_title="C", media_server_id="m",
+                             tmdb_id=1, tvdb_id=None, title="Dune", media_type="movie",
+                             add_date=TODAY, delete_after_days=5, image_path=image_path)
+
+    class FM:
+        def __init__(self, it): self.it = it
+        def scheduled_items(self): return [self.it]
+
+    v = build_dashboard(FM(item("https://image.tmdb.org/x.jpg")), None, None, today=TODAY)
+    assert v[0].poster == "https://image.tmdb.org/x.jpg"
+    v2 = build_dashboard(FM(item("/relative.jpg")), None, None, today=TODAY)  # non-http dropped
+    assert v2[0].poster is None
+    v3 = build_dashboard(FM(item(None)), None, None, today=TODAY)
+    assert v3[0].poster is None
+    print("ok  build_dashboard maps http image_path -> poster")
+
+
 def test_store_keep_events():
     with tempfile.TemporaryDirectory() as d:
         s = Store(os.path.join(d, "t.db"))

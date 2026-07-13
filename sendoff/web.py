@@ -188,7 +188,9 @@ _DASHBOARD = _PAGE.replace("{{ title_tag }}", "sendoff — leaving soon") + """
 {% if error %}<div class="card"><b>Could not load:</b> {{ error }}</div>{% endif %}
 {% if not items and not error %}<div class="card">Nothing is scheduled for deletion right now.</div>{% endif %}
 {% for it in items %}
-<div class="card">
+<div class="card" style="display:flex;gap:14px;align-items:flex-start">
+  {% if it.poster %}<img src="{{ it.poster }}" alt="" loading="lazy" style="width:70px;height:105px;object-fit:cover;border-radius:6px;flex:none;background:#8882">{% endif %}
+  <div style="flex:1;min-width:0">
   <div class="big">{{ it.title }}</div>
   <div class="muted">{{ it.media_type }} · collection “{{ it.collection_title }}”</div>
   <p style="margin:.6rem 0">
@@ -211,6 +213,7 @@ _DASHBOARD = _PAGE.replace("{{ title_tag }}", "sendoff — leaving soon") + """
       {% endfor %}{% else %}<span class="muted">none in the lookback window</span>{% endif %}
     </td></tr>
   </table>
+  </div>
 </div>
 {% endfor %}
 

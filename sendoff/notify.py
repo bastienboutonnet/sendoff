@@ -264,6 +264,7 @@ class ItemView:
     size_bytes: Optional[int]
     requester_email: Optional[str]
     requester_name: Optional[str]
+    poster: Optional[str] = None          # TMDB cover URL from Maintainerr's image_path
     watchers: list[WatcherView] = field(default_factory=list)
 
 
@@ -310,6 +311,7 @@ def build_dashboard(maintainerr, seerr, stat, today: Optional[date] = None) -> l
             size_bytes=None,
             requester_email=req_email,
             requester_name=req_name,
+            poster=(item.image_path if str(item.image_path or "").startswith("http") else None),
             watchers=watchers,
         ))
     views.sort(key=lambda v: v.deletion_date)
