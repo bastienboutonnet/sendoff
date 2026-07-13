@@ -386,8 +386,8 @@ def run_once(store, maintainerr, seerr, stat,
                     continue
             except ValueError:
                 pass
-        if now.hour < config.DIGEST_HOUR:
-            summary.batched_waiting += 1              # holding until the daily digest hour
+        if (now.hour, now.minute) < (config.DIGEST_HOUR, config.DIGEST_MINUTE):
+            summary.batched_waiting += 1              # holding until the daily digest time
             continue
         entries = slot["entries"]
         recipient = Recipient(email=email, role=entries[0][1], name=slot["name"])

@@ -186,12 +186,13 @@ def test_run_once_batches_dryrun_and_ratelimit():
             return self.items
 
     saved = (config.DRY_RUN, config.NOTIFY_DAYS_BEFORE, config.NOTIFY_REQUESTER,
-             config.NOTIFY_WATCHERS, config.DIGEST_HOUR, notify.send_email)
+             config.NOTIFY_WATCHERS, config.DIGEST_HOUR, config.DIGEST_MINUTE, notify.send_email)
     try:
         config.NOTIFY_DAYS_BEFORE = 0
         config.NOTIFY_REQUESTER = True
         config.NOTIFY_WATCHERS = False
         config.DIGEST_HOUR = 9
+        config.DIGEST_MINUTE = 0
         notify.send_email = lambda *a, **k: True
         now = datetime(2026, 7, 13, 9, 0, 0)   # 09:00 == DIGEST_HOUR -> eligible
         with tempfile.TemporaryDirectory() as d:
@@ -229,7 +230,7 @@ def test_run_once_batches_dryrun_and_ratelimit():
         print("ok  run_once: batches, DRY_RUN writes nothing, daily digest hour")
     finally:
         (config.DRY_RUN, config.NOTIFY_DAYS_BEFORE, config.NOTIFY_REQUESTER,
-         config.NOTIFY_WATCHERS, config.DIGEST_HOUR, notify.send_email) = saved
+         config.NOTIFY_WATCHERS, config.DIGEST_HOUR, config.DIGEST_MINUTE, notify.send_email) = saved
 
 
 def test_token_round_trip():
