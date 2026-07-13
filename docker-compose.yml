@@ -1,0 +1,12 @@
+services:
+  sendoff:
+    build: .
+    container_name: sendoff
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./data:/data
+    ports:
+      # Dashboard + /keep. Publish behind a tunnel; put Cloudflare Access (or
+      # equivalent) in front of everything EXCEPT /keep.
+      - "8623:8623"
