@@ -69,8 +69,8 @@ class MaintainerrClient:
         self.base = (base_url or config.MAINTAINERR_URL).rstrip("/")
 
     def _get(self, path: str, params: dict | None = None):
-        import requests
-        r = requests.get(f"{self.base}{path}", params=params, timeout=30)
+        from . import net
+        r = net.session().get(f"{self.base}{path}", params=params, timeout=30)
         r.raise_for_status()
         return r.json()
 
@@ -84,9 +84,9 @@ class MaintainerrClient:
         your Maintainerr build expects the collection_media row id instead,
         adjust the caller to pass that.
         """
-        import requests
+        from . import net
         try:
-            r = requests.delete(
+            r = net.session().delete(
                 f"{self.base}/api/collections/media",
                 params={"mediaId": media_id, "collectionId": collection_id},
                 timeout=30,
@@ -102,7 +102,20 @@ class MaintainerrClient:
         return self._get("/api/collections") or []
 
     def collection_media(self, collection_id: int) -> list[dict]:
-        return self._get("/api/collections/media/", {"collectionId": collection_id}) or []
+        """All media in a collection, WITH metadata (title, type). Uses the
+        paginated content endpoint whose items carry `mediaData` — the bare
+        /api/collections/media endpoint omits the human title."""
+        out: list[dict] = []
+        page = 1
+        while True:
+            d = self._get(f"/api/collections/media/{collection_id}/content/{page}", {"size": 100})
+            items = (d.get("items") if isinstance(d, dict) else d) or []
+            out.extend(items)
+            total = d.get("totalSize", len(out)) if isinstance(d, dict) else len(out)
+            if not items or len(out) >= total:
+                break
+            page += 1
+        return out
 
     def scheduled_items(self) -> list[ScheduledItem]:
         """Every media item currently in a deleting collection, with its
@@ -136,7 +149,7 @@ class MaintainerrClient:
                     tmdb_id=m.get("tmdbId"),
                     tvdb_id=m.get("tvdbId"),
                     title=_media_title(m) or title,
-                    media_type=col.get("type") or "movie",
+                    media_type=(m.get("mediaData") or {}).get("type") or col.get("type") or "movie",
                     add_date=add_date,
                     delete_after_days=int(delete_after),
                     image_path=m.get("image_path"),

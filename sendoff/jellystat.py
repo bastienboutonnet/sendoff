@@ -53,8 +53,8 @@ class JellystatClient:
         return bool(self.base and self.token)
 
     def _post(self, path: str, body: dict):
-        import requests
-        r = requests.post(
+        from . import net
+        r = net.session().post(
             f"{self.base}{path}",
             json=body,
             headers={"x-api-token": self.token},

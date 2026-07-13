@@ -43,8 +43,8 @@ class JellyseerrClient:
         return bool(self.base and self.api_key)
 
     def _get(self, path: str, params: dict | None = None):
-        import requests
-        r = requests.get(
+        from . import net
+        r = net.session().get(
             f"{self.base}{path}",
             params=params,
             headers={"X-Api-Key": self.api_key},
