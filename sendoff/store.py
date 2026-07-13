@@ -36,6 +36,14 @@ CREATE TABLE IF NOT EXISTS items (
     deletion_date   TEXT,   -- ISO yyyy-mm-dd, last computed
     last_seen        TEXT   -- ISO timestamp we last saw it in a collection
 );
+CREATE TABLE IF NOT EXISTS keep_events (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    email           TEXT,          -- who clicked keep (None for legacy v1 links)
+    media_server_id TEXT,
+    title           TEXT,          -- captured at click time (item may be gone later)
+    collection_id   INTEGER,
+    kept_at         TEXT           -- ISO timestamp
+);
 """
 
 
@@ -44,8 +52,14 @@ class Store:
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
         self.db = sqlite3.connect(path)
         self.db.row_factory = sqlite3.Row
+        # Poll thread and web threads share the file; wait rather than error on
+        # a concurrent write.
+        self.db.execute("PRAGMA busy_timeout=5000")
         self.db.executescript(SCHEMA)
         self.db.commit()
+
+    def close(self) -> None:
+        self.db.close()
 
     # --- dedupe ledger -------------------------------------------------------
     def already_notified(self, media_server_id: str, email: str, phase: str, add_date: str) -> bool:
@@ -102,3 +116,18 @@ class Store:
     def delete_item(self, media_server_id: str) -> None:
         self.db.execute("DELETE FROM items WHERE media_server_id=?", (media_server_id,))
         self.db.commit()
+
+    # --- keep events (who asked to keep what) --------------------------------
+    def record_keep(self, email: str | None, media_server_id: str, title: str | None,
+                    collection_id: int, kept_at: str) -> None:
+        self.db.execute(
+            "INSERT INTO keep_events(email,media_server_id,title,collection_id,kept_at) "
+            "VALUES(?,?,?,?,?)",
+            (email, media_server_id, title, collection_id, kept_at),
+        )
+        self.db.commit()
+
+    def recent_keeps(self, limit: int = 100) -> list[sqlite3.Row]:
+        return self.db.execute(
+            "SELECT * FROM keep_events ORDER BY id DESC LIMIT ?", (limit,)
+        ).fetchall()

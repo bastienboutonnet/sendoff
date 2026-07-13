@@ -103,14 +103,16 @@ def _friendly_type(media_type: str) -> str:
     return {"show": "series", "season": "series", "episode": "episode"}.get(media_type, "movie")
 
 
-def keep_link(item: ScheduledItem) -> Optional[str]:
+def keep_link(item: ScheduledItem, email: Optional[str] = None) -> Optional[str]:
     """A one-click self-service keep URL for this item, or None if the web app /
-    signing secret isn't configured. The token expires one day after the
+    signing secret isn't configured. `email` is embedded so the keep can be
+    attributed to the person who clicked. The token expires one day after the
     scheduled deletion, so a link is useless once the item is gone."""
     if not (config.PUBLIC_BASE_URL and config.SIGNING_SECRET):
         return None
     exp = int(time.mktime((item.deletion_date + timedelta(days=1)).timetuple()))
-    token = tokens.mint(config.SIGNING_SECRET, item.media_server_id, item.collection_id, exp)
+    token = tokens.mint(config.SIGNING_SECRET, item.media_server_id,
+                        item.collection_id, exp, email=email)
     return f"{config.PUBLIC_BASE_URL}/keep?token={token}"
 
 
@@ -142,7 +144,7 @@ def compose(item: ScheduledItem, recipient: Recipient,
     else:
         lede = f"The {kind} “{item.title}”, which you watched recently, is scheduled to be removed"
 
-    link = keep_link(item)
+    link = keep_link(item, recipient.email)
     if link:
         keep_text = f"If you'd like to keep it, open this link before then:\n{link}"
     else:
@@ -203,7 +205,7 @@ def compose_digest(entries, recipient: Recipient, today: date) -> tuple[str, str
     for item, role in entries:
         when, _ = _when_phrases(item.deletion_date, item.days_until_deletion(today))
         lines.append(f"• {item.title} — leaves {when} — {_reason(role)}")
-        link = keep_link(item)
+        link = keep_link(item, recipient.email)
         if link:
             lines.append(f"    Keep it: {link}")
     lines += ["", "Do nothing and each will be removed on the date shown."]
@@ -215,7 +217,7 @@ def compose_digest(entries, recipient: Recipient, today: date) -> tuple[str, str
     rows = []
     for item, role in entries:
         _, when_html = _when_phrases(item.deletion_date, item.days_until_deletion(today))
-        link = keep_link(item)
+        link = keep_link(item, recipient.email)
         if link:
             action = (f'<a href="{html.escape(link)}" style="display:inline-block;background:#2563eb;'
                       'color:#fff;text-decoration:none;padding:8px 14px;border-radius:6px;font-size:13px;'

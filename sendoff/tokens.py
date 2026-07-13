@@ -7,7 +7,9 @@ HMAC-SHA256 blobs: unforgeable without SIGNING_SECRET, non-enumerable, and
 self-expiring. No server-side state required.
 
 Token format:  base64url(payload) + "." + base64url(hmac_sha256(secret, payload))
-Payload:       "v1:{media_id}:{collection_id}:{exp_unix}"
+Payload:       "v1:{media_id}:{collection_id}:{exp_unix}"                 (item-only)
+               "v2:{media_id}:{collection_id}:{email}:{exp_unix}"        (per-recipient)
+v2 carries the recipient email so a keep click can be attributed to a person.
 """
 from __future__ import annotations
 
@@ -31,17 +33,22 @@ def _sign(secret: str, payload: bytes) -> bytes:
     return hmac.new(secret.encode("utf-8"), payload, sha256).digest()
 
 
-def mint(secret: str, media_id: str, collection_id: int, exp_unix: int) -> str:
-    """Create a keep token for one (media_id, collection_id) valid until exp_unix."""
+def mint(secret: str, media_id: str, collection_id: int, exp_unix: int,
+         email: Optional[str] = None) -> str:
+    """Create a keep token for one (media_id, collection_id) valid until exp_unix.
+    When `email` is given, a v2 token carries it so the keep can be attributed."""
     if not secret:
         raise ValueError("SIGNING_SECRET is not set; cannot mint keep tokens")
-    payload = f"v1:{media_id}:{collection_id}:{int(exp_unix)}".encode("utf-8")
+    if email:
+        payload = f"v2:{media_id}:{collection_id}:{email}:{int(exp_unix)}".encode("utf-8")
+    else:
+        payload = f"v1:{media_id}:{collection_id}:{int(exp_unix)}".encode("utf-8")
     return f"{_b64e(payload)}.{_b64e(_sign(secret, payload))}"
 
 
 def verify(secret: str, token: str, now: Optional[float] = None) -> Optional[dict]:
-    """Return {media_id, collection_id, exp} if the token is authentic and not
-    expired, else None. Constant-time signature comparison."""
+    """Return {media_id, collection_id, email, exp} if the token is authentic and
+    not expired, else None. `email` is None for v1 tokens. Constant-time compare."""
     if not secret or not token or "." not in token:
         return None
     try:
@@ -51,12 +58,17 @@ def verify(secret: str, token: str, now: Optional[float] = None) -> Optional[dic
         if not hmac.compare_digest(expected, _b64d(sig_b64)):
             return None
         parts = payload.decode("utf-8").split(":")
-        if len(parts) != 4 or parts[0] != "v1":
+        if parts[0] == "v1" and len(parts) == 4:
+            _, media_id, collection_id, exp = parts
+            email = None
+        elif parts[0] == "v2" and len(parts) == 5:
+            _, media_id, collection_id, email, exp = parts
+        else:
             return None
-        _, media_id, collection_id, exp = parts
         exp_i = int(exp)
         if (now if now is not None else time.time()) > exp_i:
             return None
-        return {"media_id": media_id, "collection_id": int(collection_id), "exp": exp_i}
+        return {"media_id": media_id, "collection_id": int(collection_id),
+                "email": email, "exp": exp_i}
     except (ValueError, TypeError):
         return None

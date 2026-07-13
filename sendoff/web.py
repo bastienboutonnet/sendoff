@@ -17,7 +17,7 @@ import base64
 import binascii
 import hmac
 import logging
-from datetime import date
+from datetime import date, datetime
 
 from flask import Flask, Response, render_template_string, request
 
@@ -26,6 +26,7 @@ from .jellyseerr import JellyseerrClient
 from .jellystat import JellystatClient
 from .maintainerr import MaintainerrClient
 from .notify import build_dashboard
+from .store import Store
 
 log = logging.getLogger("sendoff.web")
 
@@ -100,8 +101,18 @@ def keep():
         return render_template_string(_KEEP_ALREADY)
 
     ok = maintainerr.remove_media(data["collection_id"], data["media_id"])
-    log.info("keep %s (collection %s) via link -> %s",
-             data["media_id"], data["collection_id"], "ok" if ok else "FAILED")
+    log.info("keep %s (collection %s) by %s via link -> %s",
+             data["media_id"], data["collection_id"], data.get("email") or "unknown",
+             "ok" if ok else "FAILED")
+    if ok:
+        store = Store(config.DB_PATH)
+        try:
+            store.record_keep(data.get("email"), data["media_id"], title,
+                              data["collection_id"], datetime.now().isoformat(timespec="seconds"))
+        except Exception as e:
+            log.warning("failed to record keep event: %s", e)
+        finally:
+            store.close()
     return render_template_string(_KEEP_DONE if ok else _KEEP_ERROR, title=title or "This title")
 
 
@@ -119,9 +130,20 @@ def dashboard():
     except Exception as e:
         log.exception("dashboard build failed: %s", e)
         items, error = [], str(e)
+    keeps = []
+    store = Store(config.DB_PATH)
+    try:
+        for r in store.recent_keeps(100):
+            keeps.append({"when": (r["kept_at"] or "")[:16].replace("T", " "),
+                          "email": r["email"] or "unknown",
+                          "title": r["title"] or "(unknown)"})
+    except Exception as e:
+        log.warning("failed to load keep events: %s", e)
+    finally:
+        store.close()
     return render_template_string(
         _DASHBOARD, items=items, error=error, today=date.today(),
-        server_name=config.SERVER_NAME, dry_run=config.DRY_RUN,
+        server_name=config.SERVER_NAME, dry_run=config.DRY_RUN, keeps=keeps,
     )
 
 
@@ -191,6 +213,16 @@ _DASHBOARD = _PAGE.replace("{{ title_tag }}", "sendoff — leaving soon") + """
   </table>
 </div>
 {% endfor %}
+
+{% if keeps %}
+<h2 style="font-size:16px;margin:2rem 0 .5rem">Kept by users <span class="muted">({{ keeps|length }})</span></h2>
+<table>
+  <tr><th>When</th><th>Who asked</th><th>Title kept</th></tr>
+  {% for k in keeps %}
+  <tr><td class="muted">{{ k.when }}</td><td>{{ k.email }}</td><td>{{ k.title }}</td></tr>
+  {% endfor %}
+</table>
+{% endif %}
 """
 
 _KEEP_DONE = _PAGE.replace("{{ title_tag }}", "Kept") + """

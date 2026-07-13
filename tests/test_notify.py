@@ -132,6 +132,19 @@ def test_store_dedupe_and_requeue():
         print("ok  store dedupe keyed on (item,email,phase,add_date) + re-queue")
 
 
+def test_store_keep_events():
+    with tempfile.TemporaryDirectory() as d:
+        s = Store(os.path.join(d, "t.db"))
+        assert s.recent_keeps() == []
+        s.record_keep("a@b.com", "m1", "Dune", 3, "2026-07-13T16:45:00")
+        s.record_keep(None, "m2", "Alien", 3, "2026-07-13T17:00:00")   # legacy v1, no email
+        rows = s.recent_keeps()
+        assert len(rows) == 2
+        assert rows[0]["title"] == "Alien" and rows[0]["email"] is None   # newest first
+        assert rows[1]["email"] == "a@b.com" and rows[1]["title"] == "Dune"
+        print("ok  store keep events record + recent (newest first)")
+
+
 def test_store_last_emailed():
     with tempfile.TemporaryDirectory() as d:
         s = Store(os.path.join(d, "t.db"))
@@ -260,7 +273,11 @@ def test_token_round_trip():
     exp = int(time.mktime((TODAY + timedelta(days=5)).timetuple()))
     tok = tokens.mint(secret, "jf-42", 7, exp)
     data = tokens.verify(secret, tok, now=time.mktime(TODAY.timetuple()))
-    assert data == {"media_id": "jf-42", "collection_id": 7, "exp": exp}, data
+    assert data == {"media_id": "jf-42", "collection_id": 7, "email": None, "exp": exp}, data
+    # v2 carries the recipient email
+    tok_v2 = tokens.mint(secret, "jf-42", 7, exp, email="who@x.com")
+    d2 = tokens.verify(secret, tok_v2, now=time.mktime(TODAY.timetuple()))
+    assert d2["email"] == "who@x.com" and d2["media_id"] == "jf-42" and d2["collection_id"] == 7
     # expired
     assert tokens.verify(secret, tok, now=exp + 1) is None
     # wrong secret
@@ -285,16 +302,20 @@ def test_keep_link_and_button():
     # Configured -> link present and verifiable.
     config.PUBLIC_BASE_URL = "https://sendoff.example.com"
     config.SIGNING_SECRET = "s3cret"
-    link = keep_link(it)
+    link = keep_link(it, "a@b.com")
     assert link and link.startswith("https://sendoff.example.com/keep?token=")
     tok = link.split("token=", 1)[1]
     data = tokens.verify("s3cret", tok, now=time.mktime(TODAY.timetuple()))
     assert data["media_id"] == it.media_server_id and data["collection_id"] == 1
-    _, text2, html2 = compose(it, Recipient(email="a@b.com", role="watcher"))
-    assert link in text2 and "Keep this" in html2
+    assert data["email"] == "a@b.com"                 # per-recipient token
+    # compose embeds a link whose token carries that recipient's email
+    _, text2, html2 = compose(it, Recipient(email="watcher@x.com", role="watcher"))
+    assert "/keep?token=" in text2 and "Keep this" in html2
+    tok2 = text2.split("token=", 1)[1].split()[0].strip()
+    assert tokens.verify("s3cret", tok2, now=time.mktime(TODAY.timetuple()))["email"] == "watcher@x.com"
     config.PUBLIC_BASE_URL = ""  # reset for isolation
     config.SIGNING_SECRET = ""
-    print("ok  keep_link gating + button in email")
+    print("ok  keep_link gating + per-recipient token in email")
 
 
 if __name__ == "__main__":

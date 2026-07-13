@@ -8,6 +8,7 @@ the /keep capability flow, and the dashboard render.
 import base64
 import os
 import sys
+import tempfile
 import time
 from datetime import date, timedelta
 
@@ -48,6 +49,7 @@ def _basic(u, p):
 def main():
     import sendoff.web as web
     web.MaintainerrClient = FakeMaintainerr
+    config.DB_PATH = os.path.join(tempfile.mkdtemp(), "web.db")  # isolate keep-event storage
     # Jellyseerr/Jellystat disabled -> dashboard still renders items with no people.
     config.SIGNING_SECRET = "s3cret"
     config.PUBLIC_BASE_URL = "https://sendoff.example.com"
@@ -84,14 +86,21 @@ def main():
     assert c.get("/keep?token=garbage").status_code == 400
     print("ok  /keep invalid token -> 400")
 
-    # /keep valid token for a queued item -> removes it
+    # /keep valid per-recipient token -> removes it AND logs the keep
     exp = int(time.time()) + 3600
-    tok = tokens.mint("s3cret", "jf-1", 3, exp)
+    tok = tokens.mint("s3cret", "jf-1", 3, exp, email="fan@x.com")
     FakeMaintainerr.removed.clear()
     r = c.get(f"/keep?token={tok}")
     assert r.status_code == 200 and b"Kept" in r.data
     assert FakeMaintainerr.removed == [(3, "jf-1")], FakeMaintainerr.removed
     print("ok  /keep valid token -> removes item, shows Kept")
+
+    # the keep is logged and surfaces on the dashboard (who + what)
+    config.TRUST_PROXY_AUTH = True
+    dash = c.get("/").data
+    config.TRUST_PROXY_AUTH = False
+    assert b"Kept by users" in dash and b"fan@x.com" in dash and b"Dune" in dash, dash[:200]
+    print("ok  keep event logged + shown on dashboard")
 
     # /keep valid token but item not queued -> Nothing to do, no removal
     tok2 = tokens.mint("s3cret", "jf-NOPE", 3, exp)
@@ -101,7 +110,7 @@ def main():
     assert FakeMaintainerr.removed == []
     print("ok  /keep for absent item -> Nothing to do, no removal")
 
-    print("\n8/8 web tests passed")
+    print("\n9/9 web tests passed")
 
 
 if __name__ == "__main__":
