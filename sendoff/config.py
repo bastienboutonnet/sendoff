@@ -60,9 +60,12 @@ NOTIFY_DAYS_BEFORE = _int("NOTIFY_DAYS_BEFORE", 0)
 # default — the heuristic (item gone AND deletion date passed) can't perfectly
 # tell a real deletion from a manual reprieve.
 NOTIFY_ON_REMOVAL = _bool("NOTIFY_ON_REMOVAL", False)
-# Batching: each person gets at most one email per this many hours, listing all
-# their pending titles together (rather than one email per title). 24 = ~daily.
-BATCH_INTERVAL_HOURS = _int("BATCH_INTERVAL_HOURS", 24)
+# Batching cadence. Each person gets at most ONE email per calendar day, listing
+# all their pending titles. The day's digest is held until this hour (local time,
+# per TZ) and then goes out on the next poll once they have pending titles. So:
+# marked overnight -> arrives ~DIGEST_HOUR; marked in the afternoon -> arrives
+# that afternoon; marked after that day's send -> waits for the next day.
+DIGEST_HOUR = _int("DIGEST_HOUR", 9)
 
 # --- Email (SMTP) ------------------------------------------------------------
 # Master switch: set false to run dashboard-only (resolve + show, never mail).

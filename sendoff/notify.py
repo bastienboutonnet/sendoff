@@ -376,16 +376,19 @@ def run_once(store, maintainerr, seerr, stat,
             store.upsert_item(item.media_server_id, item.title,
                               item.deletion_date.isoformat(), now_iso)
 
-    # One batched digest per recipient, capped to one per BATCH_INTERVAL_HOURS.
+    # One batched digest per recipient per calendar day, held until DIGEST_HOUR.
     for email, slot in pending.items():
         last = store.last_emailed(email)
         if last:
             try:
-                if now - datetime.fromisoformat(last) < timedelta(hours=config.BATCH_INTERVAL_HOURS):
-                    summary.batched_waiting += 1
+                if datetime.fromisoformat(last).date() == today:
+                    summary.batched_waiting += 1      # already sent today's digest
                     continue
             except ValueError:
                 pass
+        if now.hour < config.DIGEST_HOUR:
+            summary.batched_waiting += 1              # holding until the daily digest hour
+            continue
         entries = slot["entries"]
         recipient = Recipient(email=email, role=entries[0][1], name=slot["name"])
         subject, text, html_body = compose_digest(entries, recipient, today)

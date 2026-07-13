@@ -186,14 +186,14 @@ def test_run_once_batches_dryrun_and_ratelimit():
             return self.items
 
     saved = (config.DRY_RUN, config.NOTIFY_DAYS_BEFORE, config.NOTIFY_REQUESTER,
-             config.NOTIFY_WATCHERS, config.BATCH_INTERVAL_HOURS, notify.send_email)
+             config.NOTIFY_WATCHERS, config.DIGEST_HOUR, notify.send_email)
     try:
         config.NOTIFY_DAYS_BEFORE = 0
         config.NOTIFY_REQUESTER = True
         config.NOTIFY_WATCHERS = False
-        config.BATCH_INTERVAL_HOURS = 24
+        config.DIGEST_HOUR = 9
         notify.send_email = lambda *a, **k: True
-        now = datetime(2026, 7, 13, 9, 0, 0)
+        now = datetime(2026, 7, 13, 9, 0, 0)   # 09:00 == DIGEST_HOUR -> eligible
         with tempfile.TemporaryDirectory() as d:
             s = Store(os.path.join(d, "t.db"))
             fm = FM()
@@ -210,19 +210,26 @@ def test_run_once_batches_dryrun_and_ratelimit():
             assert r2.sent == 1 and r2.titles_sent == 2
             assert s.db.execute("SELECT COUNT(*) c FROM notified").fetchone()["c"] == 2
 
-            # A new title for the same person within the window WAITS (rate-limit).
+            # A new title the SAME day waits — already had today's digest.
             fm.items = [a, b, c]
             r3 = run_once(s, fm, _FakeSeerr(), _FakeStat(), today=TODAY, now=now)
             assert r3.batched_waiting == 1 and r3.sent == 0, (r3.batched_waiting, r3.sent)
 
-            # After the batch window, the new title goes out.
-            later = datetime(2026, 7, 14, 10, 0, 0)
-            r4 = run_once(s, fm, _FakeSeerr(), _FakeStat(), today=TODAY, now=later)
+            # Next day, at/after the digest hour, the new title goes out.
+            r4 = run_once(s, fm, _FakeSeerr(), _FakeStat(),
+                          today=date(2026, 7, 14), now=datetime(2026, 7, 14, 10, 0, 0))
             assert r4.sent == 1 and r4.titles_sent == 1, (r4.sent, r4.titles_sent)
-        print("ok  run_once: batches, DRY_RUN writes nothing, per-recipient rate-limit")
+
+        # Before DIGEST_HOUR, a fresh recipient holds for the daily send time.
+        with tempfile.TemporaryDirectory() as d2:
+            s2 = Store(os.path.join(d2, "t.db"))
+            rh = run_once(s2, FM(), _FakeSeerr(), _FakeStat(),
+                          today=date(2026, 7, 15), now=datetime(2026, 7, 15, 7, 0, 0))
+            assert rh.sent == 0 and rh.batched_waiting >= 1, (rh.sent, rh.batched_waiting)
+        print("ok  run_once: batches, DRY_RUN writes nothing, daily digest hour")
     finally:
         (config.DRY_RUN, config.NOTIFY_DAYS_BEFORE, config.NOTIFY_REQUESTER,
-         config.NOTIFY_WATCHERS, config.BATCH_INTERVAL_HOURS, notify.send_email) = saved
+         config.NOTIFY_WATCHERS, config.DIGEST_HOUR, notify.send_email) = saved
 
 
 def test_token_round_trip():

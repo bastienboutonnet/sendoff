@@ -6,7 +6,7 @@ Three tables:
   a re-queue after a keep — same item, new add-date — is eligible again, while a
   single continuous stint is still emailed only once.
 - `recipients` — per-email timestamp of the last digest we sent, to cap sends to
-  roughly one per BATCH_INTERVAL_HOURS.
+  one per calendar day (see DIGEST_HOUR).
 - `items` — last-seen deletion date per item, used only for removal detection.
 
 DRY_RUN never writes here (see notify.py) — it's a pure preview.
