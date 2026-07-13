@@ -24,8 +24,14 @@ log = logging.getLogger("sendoff.notify")
 # ---------------------------------------------------------------------------
 
 def select_due(items: Iterable[ScheduledItem], today: date, notify_days_before: int) -> list[ScheduledItem]:
-    """Items whose scheduled deletion is within `notify_days_before` days
-    (including already-overdue ones still sitting in the collection)."""
+    """Which items warrant a "leaving soon" notice this cycle.
+
+    Immediate mode (`notify_days_before` falsy, the default): every scheduled
+    item is due the moment it appears — the dedupe ledger then ensures each
+    person is emailed once. Windowed mode (`> 0`): only items whose deletion is
+    within that many days (including overdue ones still in the collection)."""
+    if not notify_days_before:
+        return list(items)
     return [it for it in items if it.days_until_deletion(today) <= notify_days_before]
 
 
@@ -108,11 +114,28 @@ def keep_link(item: ScheduledItem) -> Optional[str]:
     return f"{config.PUBLIC_BASE_URL}/keep?token={token}"
 
 
-def compose(item: ScheduledItem, recipient: Recipient) -> tuple[str, str, str]:
-    """Return (subject, text_body, html_body) tailored to the recipient's role."""
+def _when_phrases(deletion_date: date, days_until: Optional[int]) -> tuple[str, str]:
+    """(plain, html) phrasings of when the deletion happens, with the countdown.
+    The html variant bolds the salient part."""
+    when = deletion_date.strftime("%A %-d %B %Y")
+    if days_until is None:
+        return f"on {when}", f"on <strong>{html.escape(when)}</strong>"
+    if days_until <= 0:
+        return f"today ({when})", f"<strong>today</strong> ({html.escape(when)})"
+    if days_until == 1:
+        return f"tomorrow ({when})", f"<strong>tomorrow</strong> ({html.escape(when)})"
+    e = html.escape(when)
+    return (f"on {when} — in {days_until} days",
+            f"on <strong>{e}</strong> — in <strong>{days_until} days</strong>")
+
+
+def compose(item: ScheduledItem, recipient: Recipient,
+            days_until: Optional[int] = None) -> tuple[str, str, str]:
+    """Return (subject, text_body, html_body) tailored to the recipient's role.
+    `days_until` (deletion date minus today) is woven in as a countdown."""
     kind = _friendly_type(item.media_type)
-    when = item.deletion_date.strftime("%A %-d %B %Y")
-    subject = f"“{item.title}” is scheduled to leave {config.SERVER_NAME} on {when}"
+    when, when_html = _when_phrases(item.deletion_date, days_until)
+    subject = f"“{item.title}” is scheduled to leave {config.SERVER_NAME} {when}"
 
     if recipient.role == "requester":
         lede = f"The {kind} “{item.title}”, which you requested, is scheduled to be removed"
@@ -126,14 +149,13 @@ def compose(item: ScheduledItem, recipient: Recipient) -> tuple[str, str, str]:
         keep_text = f"If you'd like to keep it, {config.KEEP_INSTRUCTIONS}"
 
     text = (
-        f"{lede} from {config.SERVER_NAME} on {when} to free up space.\n\n"
+        f"{lede} from {config.SERVER_NAME} {when} to free up space.\n\n"
         f"{keep_text}\n\n"
         f"— {config.SENDER_NAME}"
     )
 
     e_title = html.escape(item.title)
     e_lede = html.escape(lede)
-    e_when = html.escape(when)
     e_server = html.escape(config.SERVER_NAME)
     e_sender = html.escape(config.SENDER_NAME)
     if link:
@@ -150,7 +172,7 @@ def compose(item: ScheduledItem, recipient: Recipient) -> tuple[str, str, str]:
 <div style="font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;max-width:520px;margin:0 auto;color:#1a1a1a">
   <h2 style="font-size:18px;margin:0 0 12px">Leaving soon: {e_title}</h2>
   <p style="font-size:15px;line-height:1.5;margin:0 0 16px">
-    {e_lede} from <strong>{e_server}</strong> on <strong>{e_when}</strong> to free up space.
+    {e_lede} from <strong>{e_server}</strong> {when_html} to free up space.
   </p>
   <div style="background:#f4f4f5;border-radius:8px;padding:14px;font-size:14px;line-height:1.5;margin:0 0 16px">
     {keep_html}
@@ -275,7 +297,7 @@ def run_once(store, maintainerr, seerr, stat, today: Optional[date] = None) -> R
             if store.already_notified(item.media_server_id, r.email, "leaving"):
                 summary.skipped_dupes += 1
                 continue
-            subject, text, html_body = compose(item, r)
+            subject, text, html_body = compose(item, r, days_until=item.days_until_deletion(today))
             if config.DRY_RUN:
                 log.info("[DRY_RUN] would email %s (%s) about %r leaving %s",
                          r.email, r.role, item.title, item.deletion_date)

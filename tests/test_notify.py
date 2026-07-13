@@ -43,6 +43,25 @@ def test_select_due_window():
     print("ok  select_due window + overdue")
 
 
+def test_select_due_immediate():
+    items = [_item(30, title="Far"), _item(3, title="Soon"), _item(-1, title="Overdue")]
+    # 0 (falsy) -> immediate: every scheduled item is due regardless of distance.
+    due = {i.title for i in select_due(items, TODAY, notify_days_before=0)}
+    assert due == {"Far", "Soon", "Overdue"}, due
+    print("ok  select_due immediate (0 = notify on first sight)")
+
+
+def test_compose_countdown():
+    it = _item(14, title="Dune")
+    _, text, html = compose(it, Recipient(email="a@b.com", role="requester"), days_until=14)
+    assert "in 14 days" in text and "in <strong>14 days</strong>" in html
+    _, t1, _ = compose(it, Recipient(email="a@b.com", role="requester"), days_until=1)
+    assert "tomorrow" in t1
+    _, t0, _ = compose(it, Recipient(email="a@b.com", role="requester"), days_until=0)
+    assert "today" in t0
+    print("ok  compose countdown (in N days / tomorrow / today)")
+
+
 def test_days_until_and_deletion_date():
     it = _item(5)
     assert it.days_until_deletion(TODAY) == 5

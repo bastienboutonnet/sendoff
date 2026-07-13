@@ -101,7 +101,7 @@ See `.env.example` for the full list. The essentials:
 | `COLLECTION_ALLOWLIST` | Restrict to named collections, or blank = all deleting collections. |
 | `JELLYSEERR_URL` / `JELLYSEERR_API_KEY` | Requester + email lookup (by tmdbId / jellyfinUserId). |
 | `JELLYSTAT_URL` / `JELLYSTAT_TOKEN` | Recent-watcher lookup (by Jellyfin item id). |
-| `NOTIFY_DAYS_BEFORE` | Email once an item is within this many days of deletion. |
+| `NOTIFY_DAYS_BEFORE` | `0` = email immediately when a title is marked (announcing the countdown); `>0` = wait until within that many days. |
 | `WATCHER_LOOKBACK_DAYS` | A watch within this many days counts as "recent". |
 | `DRY_RUN` | Log recipients, send nothing. Default true. |
 

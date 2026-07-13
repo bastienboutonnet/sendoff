@@ -52,9 +52,10 @@ NOTIFY_WATCHERS = _bool("NOTIFY_WATCHERS", True)     # recent watchers (Jellysta
 ADMIN_EMAIL = os.environ.get("ADMIN_EMAIL", "").strip()
 
 # --- Timing ------------------------------------------------------------------
-# Send the "leaving soon" mail once the item is within this many days of its
-# scheduled deletion. Mirrors Maintainerr's "Notify x days before removal".
-NOTIFY_DAYS_BEFORE = _int("NOTIFY_DAYS_BEFORE", 7)
+# 0 (default) = notify IMMEDIATELY when a title is marked, announcing the full
+# grace window ("deletes on <date>, in N days"). Set > 0 to instead wait until
+# the deletion is within that many days (a later reminder-style window).
+NOTIFY_DAYS_BEFORE = _int("NOTIFY_DAYS_BEFORE", 0)
 # Also send a "was removed" confirmation once the item actually leaves. Off by
 # default — the heuristic (item gone AND deletion date passed) can't perfectly
 # tell a real deletion from a manual reprieve.
