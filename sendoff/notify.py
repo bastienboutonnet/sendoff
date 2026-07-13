@@ -182,6 +182,65 @@ def compose(item: ScheduledItem, recipient: Recipient,
     return subject, text, html_body
 
 
+def _reason(role: str) -> str:
+    return "you requested it" if role == "requester" else "you watched it recently"
+
+
+def compose_digest(entries, recipient: Recipient, today: date) -> tuple[str, str, str]:
+    """Batch email for one person. `entries` is a list of (item, role). One entry
+    yields the personal single-title email; several yield a listed digest."""
+    if len(entries) == 1:
+        item, role = entries[0]
+        return compose(item, Recipient(recipient.email, role, recipient.name),
+                       days_until=item.days_until_deletion(today))
+
+    entries = sorted(entries, key=lambda e: e[0].deletion_date)
+    n = len(entries)
+    server = config.SERVER_NAME
+    subject = f"{n} titles are scheduled to leave {server} soon"
+
+    lines = [f"These {n} titles on {server} are scheduled to be removed to free up space:", ""]
+    for item, role in entries:
+        when, _ = _when_phrases(item.deletion_date, item.days_until_deletion(today))
+        lines.append(f"• {item.title} — leaves {when} — {_reason(role)}")
+        link = keep_link(item)
+        if link:
+            lines.append(f"    Keep it: {link}")
+    lines += ["", "Do nothing and each will be removed on the date shown."]
+    if not (config.PUBLIC_BASE_URL and config.SIGNING_SECRET):
+        lines.append(f"To keep any of them, {config.KEEP_INSTRUCTIONS}")
+    lines += ["", f"— {config.SENDER_NAME}"]
+    text = "\n".join(lines)
+
+    rows = []
+    for item, role in entries:
+        _, when_html = _when_phrases(item.deletion_date, item.days_until_deletion(today))
+        link = keep_link(item)
+        if link:
+            action = (f'<a href="{html.escape(link)}" style="display:inline-block;background:#2563eb;'
+                      'color:#fff;text-decoration:none;padding:8px 14px;border-radius:6px;font-size:13px;'
+                      'font-weight:600">Keep this</a>')
+        else:
+            action = f'<span style="font-size:13px;color:#71717a">{html.escape(config.KEEP_INSTRUCTIONS)}</span>'
+        rows.append(
+            '<tr><td style="padding:14px 0;border-bottom:0.5px solid #e5e5e5">'
+            f'<div style="font-size:15px;font-weight:600;color:#1a1a1a">{html.escape(item.title)}</div>'
+            f'<div style="font-size:13px;color:#71717a;margin:2px 0 8px">leaves {when_html} · {html.escape(_reason(role))}</div>'
+            f'{action}</td></tr>'
+        )
+    html_body = (
+        '<div style="font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;'
+        'max-width:540px;margin:0 auto;color:#1a1a1a">'
+        f'<h2 style="font-size:18px;margin:0 0 6px">{n} titles leaving {html.escape(server)} soon</h2>'
+        '<p style="font-size:14px;line-height:1.5;color:#444;margin:0 0 8px">'
+        'These are scheduled to be removed to free up space. Keep any you want to hold onto:</p>'
+        f'<table style="width:100%;border-collapse:collapse">{"".join(rows)}</table>'
+        f'<p style="font-size:13px;color:#71717a;margin:16px 0 0">— {html.escape(config.SENDER_NAME)}</p>'
+        '</div>'
+    )
+    return subject, text, html_body
+
+
 # ---------------------------------------------------------------------------
 # Dashboard view model (read-only)
 # ---------------------------------------------------------------------------
@@ -263,59 +322,89 @@ def build_dashboard(maintainerr, seerr, stat, today: Optional[date] = None) -> l
 class RunSummary:
     scheduled: int = 0
     due: int = 0
-    sent: int = 0
+    sent: int = 0             # digest emails sent
+    titles_sent: int = 0      # titles across those digests
     skipped_dupes: int = 0
     no_recipients: int = 0
+    batched_waiting: int = 0  # recipients holding for their next batch window
     removed_notifications: int = 0
 
     def __str__(self) -> str:
-        return (f"{self.scheduled} scheduled, {self.due} due, {self.sent} emails sent"
-                f" ({self.skipped_dupes} already-sent, {self.no_recipients} no-recipient)"
-                f"{f', {self.removed_notifications} removal notices' if self.removed_notifications else ''}")
+        extra = ""
+        if self.batched_waiting:
+            extra += f", {self.batched_waiting} waiting for batch window"
+        if self.removed_notifications:
+            extra += f", {self.removed_notifications} removal notices"
+        return (f"{self.scheduled} scheduled, {self.due} due, {self.sent} email(s) sent"
+                f" covering {self.titles_sent} title(s)"
+                f" ({self.skipped_dupes} already-sent, {self.no_recipients} no-recipient){extra}")
 
 
-def run_once(store, maintainerr, seerr, stat, today: Optional[date] = None) -> RunSummary:
+def run_once(store, maintainerr, seerr, stat,
+             today: Optional[date] = None, now: Optional[datetime] = None) -> RunSummary:
     today = today or date.today()
-    now_iso = datetime.now().isoformat(timespec="seconds")
+    now = now or datetime.now()
+    now_iso = now.isoformat(timespec="seconds")
     summary = RunSummary()
 
     items = maintainerr.scheduled_items()
     summary.scheduled = len(items)
     present_ids = {it.media_server_id for it in items}
+    due = select_due(items, today, config.NOTIFY_DAYS_BEFORE)
+    summary.due = len(due)
 
-    # 1) Advance "leaving soon" notices.
-    for item in select_due(items, today, config.NOTIFY_DAYS_BEFORE):
-        summary.due += 1
-        store.upsert_item(item.media_server_id, item.title,
-                          item.deletion_date.isoformat(), now_iso)
-        recipients = resolve_recipients(item, seerr, stat, today)
-        if not recipients:
+    # Group each person's not-yet-notified titles together (batching). Dedupe is
+    # keyed on the item's add-date, so a re-queued title (new stint) is eligible
+    # again while a continuous stint is only emailed once.
+    pending: dict[str, dict] = {}   # email -> {"name": str|None, "entries": [(item, role)]}
+    for item in due:
+        recips = resolve_recipients(item, seerr, stat, today)
+        if not recips:
             summary.no_recipients += 1
-            log.info("no recipients for %r (leaves %s)", item.title, item.deletion_date)
             continue
-        for r in recipients:
-            if store.already_notified(item.media_server_id, r.email, "leaving"):
+        add_key = item.add_date.isoformat()
+        for r in recips:
+            if store.already_notified(item.media_server_id, r.email, "leaving", add_key):
                 summary.skipped_dupes += 1
                 continue
-            subject, text, html_body = compose(item, r, days_until=item.days_until_deletion(today))
-            if config.DRY_RUN:
-                log.info("[DRY_RUN] would email %s (%s) about %r leaving %s",
-                         r.email, r.role, item.title, item.deletion_date)
-            else:
-                if not send_email(r.email, subject, text, html_body):
-                    log.warning("send failed, will retry next cycle: %s / %r", r.email, item.title)
+            slot = pending.setdefault(r.email, {"name": r.name, "entries": []})
+            slot["entries"].append((item, r.role))
+
+    # Track present items for removal detection (skip all writes in DRY_RUN).
+    if not config.DRY_RUN:
+        for item in items:
+            store.upsert_item(item.media_server_id, item.title,
+                              item.deletion_date.isoformat(), now_iso)
+
+    # One batched digest per recipient, capped to one per BATCH_INTERVAL_HOURS.
+    for email, slot in pending.items():
+        last = store.last_emailed(email)
+        if last:
+            try:
+                if now - datetime.fromisoformat(last) < timedelta(hours=config.BATCH_INTERVAL_HOURS):
+                    summary.batched_waiting += 1
                     continue
-            store.record_notified(item.media_server_id, r.email, "leaving", now_iso)
-            summary.sent += 1
+            except ValueError:
+                pass
+        entries = slot["entries"]
+        recipient = Recipient(email=email, role=entries[0][1], name=slot["name"])
+        subject, text, html_body = compose_digest(entries, recipient, today)
+        titles = ", ".join(f"“{it.title}”" for it, _ in entries)
+        if config.DRY_RUN:
+            log.info("[DRY_RUN] would email %s about %d title(s): %s", email, len(entries), titles)
+        else:
+            if not send_email(email, subject, text, html_body):
+                log.warning("digest send to %s failed, will retry next cycle", email)
+                continue
+            for it, _role in entries:
+                store.record_notified(it.media_server_id, email, "leaving",
+                                      it.add_date.isoformat(), now_iso)
+            store.set_last_emailed(email, now_iso)
+        summary.sent += 1
+        summary.titles_sent += len(entries)
 
-    # Refresh last_seen for everything still present (even if not yet due) so
-    # removal detection has an accurate picture.
-    for item in items:
-        store.upsert_item(item.media_server_id, item.title,
-                          item.deletion_date.isoformat(), now_iso)
-
-    # 2) Optional removal confirmations for items that have disappeared.
-    if config.NOTIFY_ON_REMOVAL:
+    # Optional removal confirmations for items that have disappeared.
+    if config.NOTIFY_ON_REMOVAL and not config.DRY_RUN:
         for row in store.all_items():
             msid = row["media_server_id"]
             if msid in present_ids:
@@ -326,10 +415,8 @@ def run_once(store, maintainerr, seerr, stat, today: Optional[date] = None) -> R
                     del_date = date.fromisoformat(row["deletion_date"])
                 except ValueError:
                     pass
-            verdict = classify_disappeared(del_date, today)
-            if verdict != "removed":
-                # reprieved / unknown -> just stop tracking, don't notify.
-                store.delete_item(msid)
+            if classify_disappeared(del_date, today) != "removed":
+                store.delete_item(msid)   # reprieved / unknown -> stop tracking, don't notify
                 continue
             summary.removed_notifications += _notify_removed(store, row, now_iso)
             store.delete_item(msid)
@@ -341,22 +428,16 @@ def _notify_removed(store, row, now_iso: str) -> int:
     """Tell everyone we warned that the item is now gone. Returns count sent."""
     title = row["title"] or "A title"
     msid = row["media_server_id"]
+    stint = row["deletion_date"] or ""   # stint key for the 'removed' phase
     sent = 0
-    # Reuse the leaving-phase ledger to find who we warned.
-    warned = store.db.execute(
-        "SELECT email FROM notified WHERE media_server_id=? AND phase='leaving'", (msid,)
-    ).fetchall()
-    for w in warned:
-        email = w["email"]
-        if store.already_notified(msid, email, "removed"):
+    for email in store.warned_emails(msid):
+        if store.already_notified(msid, email, "removed", stint):
             continue
         subject = f"“{title}” has been removed from {config.SERVER_NAME}"
         text = (f"“{title}” has now been removed from {config.SERVER_NAME} to free up space.\n\n"
                 f"You can request it again any time if you'd like it back.\n\n— {config.SENDER_NAME}")
-        if config.DRY_RUN:
-            log.info("[DRY_RUN] would email %s that %r was removed", email, title)
-        elif not send_email(email, subject, text):
+        if not send_email(email, subject, text):
             continue
-        store.record_notified(msid, email, "removed", now_iso)
+        store.record_notified(msid, email, "removed", stint, now_iso)
         sent += 1
     return sent

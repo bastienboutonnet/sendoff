@@ -6,13 +6,15 @@ import os
 import sys
 import tempfile
 import time
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from sendoff import config, tokens  # noqa: E402
+import sendoff.notify as notify  # noqa: E402
 from sendoff.maintainerr import ScheduledItem, _parse_date  # noqa: E402
-from sendoff.notify import select_due, classify_disappeared, compose, keep_link, Recipient  # noqa: E402
+from sendoff.notify import (select_due, classify_disappeared, compose, compose_digest,  # noqa: E402
+                            keep_link, run_once, Recipient)
 from sendoff.jellystat import JellystatClient, Watch  # noqa: E402
 from sendoff.store import Store  # noqa: E402
 
@@ -115,17 +117,112 @@ def test_recent_watchers_lookback():
     print("ok  recent_watchers lookback + dedupe + fail-open")
 
 
-def test_store_dedupe():
+def test_store_dedupe_and_requeue():
     with tempfile.TemporaryDirectory() as d:
         s = Store(os.path.join(d, "t.db"))
-        assert not s.already_notified("m1", "a@b.com", "leaving")
-        s.record_notified("m1", "a@b.com", "leaving", "2026-07-13T00:00:00")
-        assert s.already_notified("m1", "a@b.com", "leaving")
-        assert not s.already_notified("m1", "a@b.com", "removed")  # different phase
-        s.record_notified("m1", "a@b.com", "leaving", "later")  # idempotent
-        rows = s.db.execute("SELECT COUNT(*) c FROM notified").fetchone()
-        assert rows["c"] == 1
-        print("ok  store dedupe key (item,email,phase)")
+        A1, A2 = "2026-07-12", "2026-08-20"   # two queue stints of the same item
+        assert not s.already_notified("m1", "a@b.com", "leaving", A1)
+        s.record_notified("m1", "a@b.com", "leaving", A1, "t0")
+        assert s.already_notified("m1", "a@b.com", "leaving", A1)
+        assert not s.already_notified("m1", "a@b.com", "removed", A1)   # different phase
+        # kept then re-queued later (new add-date) -> eligible to notify again
+        assert not s.already_notified("m1", "a@b.com", "leaving", A2)
+        s.record_notified("m1", "a@b.com", "leaving", A1, "later")      # idempotent
+        assert s.db.execute("SELECT COUNT(*) c FROM notified").fetchone()["c"] == 1
+        print("ok  store dedupe keyed on (item,email,phase,add_date) + re-queue")
+
+
+def test_store_last_emailed():
+    with tempfile.TemporaryDirectory() as d:
+        s = Store(os.path.join(d, "t.db"))
+        assert s.last_emailed("a@b.com") is None
+        s.set_last_emailed("a@b.com", "2026-07-13T09:00:00")
+        assert s.last_emailed("a@b.com") == "2026-07-13T09:00:00"
+        s.set_last_emailed("a@b.com", "2026-07-14T09:00:00")   # upsert
+        assert s.last_emailed("a@b.com") == "2026-07-14T09:00:00"
+        print("ok  store last_emailed upsert")
+
+
+def test_compose_digest():
+    a = _item(14, title="Dune", tmdb=1)
+    b = _item(3, title="Alien", tmdb=2)
+    subj, text, html = compose_digest([(a, "requester"), (b, "watcher")],
+                                      Recipient("x@y.com", "requester"), TODAY)
+    assert "2 titles" in subj
+    assert "Dune" in text and "Alien" in text
+    assert "you requested it" in text and "you watched it recently" in text
+    assert text.index("Alien") < text.index("Dune")   # sorted soonest-first
+    assert "Dune" in html and "Alien" in html
+    s1, _, _ = compose_digest([(a, "requester")], Recipient("x@y.com", "requester"), TODAY)
+    assert "Dune" in s1 and "titles" not in s1          # single falls back to personal
+    print("ok  compose_digest lists multiple; single falls back")
+
+
+class _FakeSeerr:
+    enabled = True
+    def requester_email(self, tmdb):  # every item requested by the same person
+        return "fan@x.com"
+    def users(self):
+        return []
+    def user_by_jellyfin_id(self, uid):
+        return None
+    def user_by_jellyfin_username(self, name):
+        return None
+
+
+class _FakeStat:
+    def recent_watchers(self, media_server_id, today):
+        return []
+
+
+def test_run_once_batches_dryrun_and_ratelimit():
+    a = _item(14, title="Dune", tmdb=1)
+    b = _item(10, title="Alien", tmdb=2)
+    c = _item(20, title="Blade", tmdb=3)
+
+    class FM:
+        items = [a, b]
+        def scheduled_items(self):
+            return self.items
+
+    saved = (config.DRY_RUN, config.NOTIFY_DAYS_BEFORE, config.NOTIFY_REQUESTER,
+             config.NOTIFY_WATCHERS, config.BATCH_INTERVAL_HOURS, notify.send_email)
+    try:
+        config.NOTIFY_DAYS_BEFORE = 0
+        config.NOTIFY_REQUESTER = True
+        config.NOTIFY_WATCHERS = False
+        config.BATCH_INTERVAL_HOURS = 24
+        notify.send_email = lambda *a, **k: True
+        now = datetime(2026, 7, 13, 9, 0, 0)
+        with tempfile.TemporaryDirectory() as d:
+            s = Store(os.path.join(d, "t.db"))
+            fm = FM()
+
+            # DRY_RUN: one batched preview of two titles, and it writes NOTHING.
+            config.DRY_RUN = True
+            r = run_once(s, fm, _FakeSeerr(), _FakeStat(), today=TODAY, now=now)
+            assert r.sent == 1 and r.titles_sent == 2, (r.sent, r.titles_sent)
+            assert s.db.execute("SELECT COUNT(*) c FROM notified").fetchone()["c"] == 0
+
+            # LIVE: sends the batch and records both titles.
+            config.DRY_RUN = False
+            r2 = run_once(s, fm, _FakeSeerr(), _FakeStat(), today=TODAY, now=now)
+            assert r2.sent == 1 and r2.titles_sent == 2
+            assert s.db.execute("SELECT COUNT(*) c FROM notified").fetchone()["c"] == 2
+
+            # A new title for the same person within the window WAITS (rate-limit).
+            fm.items = [a, b, c]
+            r3 = run_once(s, fm, _FakeSeerr(), _FakeStat(), today=TODAY, now=now)
+            assert r3.batched_waiting == 1 and r3.sent == 0, (r3.batched_waiting, r3.sent)
+
+            # After the batch window, the new title goes out.
+            later = datetime(2026, 7, 14, 10, 0, 0)
+            r4 = run_once(s, fm, _FakeSeerr(), _FakeStat(), today=TODAY, now=later)
+            assert r4.sent == 1 and r4.titles_sent == 1, (r4.sent, r4.titles_sent)
+        print("ok  run_once: batches, DRY_RUN writes nothing, per-recipient rate-limit")
+    finally:
+        (config.DRY_RUN, config.NOTIFY_DAYS_BEFORE, config.NOTIFY_REQUESTER,
+         config.NOTIFY_WATCHERS, config.BATCH_INTERVAL_HOURS, notify.send_email) = saved
 
 
 def test_token_round_trip():

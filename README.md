@@ -19,8 +19,8 @@ hand-pick → manual collection
                                            for each item within NOTIFY_DAYS_BEFORE:
                                              ├─ tmdbId       → Jellyseerr requester email
                                              └─ mediaServerId → Jellystat watchers → email
-                                             └─ one styled email per person
-                                             └─ SQLite dedupe (item, email, phase)
+                                             └─ ONE batched email per person (~daily)
+                                             └─ SQLite dedupe (item, email, phase, add-date)
   grace expires → deletes via *arr
                 → resets Seerr request       (optional) "was removed" confirmation
 ```
@@ -115,7 +115,7 @@ See `.env.example` for the full list. The essentials:
   fan-out + email composition (incl. the keep link) + `build_dashboard` view model.
 - `tokens.py` — HMAC-signed capability tokens for `/keep` (mint/verify).
 - `web.py` — Flask app: `/` dashboard (auth), `/keep` (token), `/healthz`.
-- `store.py` — SQLite dedupe ledger `(item, email, phase)` + item tracking.
+- `store.py` — SQLite dedupe ledger `(item, email, phase, add-date)` + per-recipient send cap + item tracking. Add-date keying re-notifies on re-queue; DRY_RUN writes nothing.
 - `mail.py` — SMTP send (per-recipient).
 - `main.py` — polls in a background thread and serves the web app. `RUN_ONCE=1`
   runs a single cycle with no web server (for dry-run validation).
