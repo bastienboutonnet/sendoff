@@ -233,6 +233,28 @@ def test_run_once_batches_dryrun_and_ratelimit():
          config.NOTIFY_WATCHERS, config.DIGEST_HOUR, config.DIGEST_MINUTE, notify.send_email) = saved
 
 
+def test_from_header():
+    from sendoff import mail
+    saved = (config.EMAIL_FROM, config.SENDER_NAME, config.SMTP_USER)
+    try:
+        # EMAIL_FROM already "Name <addr>" -> use as-is, no double-wrap
+        config.EMAIL_FROM = "Bastien Boutonnet - Media Server <bastien.b@icloud.com>"
+        config.SENDER_NAME = "Ignored"
+        h = mail._from_header()
+        assert h.count("<") == 1 and "bastien.b@icloud.com" in h and "Media Server" in h, h
+        # bare address -> wrap with SENDER_NAME
+        config.EMAIL_FROM = "bastien.b@icloud.com"
+        config.SENDER_NAME = "My Server"
+        assert mail._from_header() == "My Server <bastien.b@icloud.com>", mail._from_header()
+        # empty EMAIL_FROM -> falls back to SMTP_USER
+        config.EMAIL_FROM = ""
+        config.SMTP_USER = "u@x.com"
+        assert mail._from_header() == "My Server <u@x.com>"
+        print("ok  _from_header: no double-wrap, bare-addr wrap, fallback")
+    finally:
+        (config.EMAIL_FROM, config.SENDER_NAME, config.SMTP_USER) = saved
+
+
 def test_token_round_trip():
     secret = "s3cret"
     exp = int(time.mktime((TODAY + timedelta(days=5)).timetuple()))
