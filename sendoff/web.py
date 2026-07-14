@@ -4,9 +4,15 @@
                       deletion collection (self-service "keep"). The signed token
                       IS the authorization; no login. Fail-safe: the only thing it
                       can do is stop a deletion.
-  GET /               READ-ONLY dashboard, behind HTTP Basic Auth (or an upstream
-                      like Cloudflare Access). Fail-closed: refuses to serve if no
-                      auth is configured. Shows what's queued + who's affected.
+  GET /               Dashboard, behind HTTP Basic Auth (or an upstream like
+                      Cloudflare Access). Fail-closed: refuses to serve if no auth
+                      is configured. Shows what's queued + who's affected.
+  POST /dashboard/keep  Keep an item straight from the dashboard, same auth as
+                      GET /. No token — the dashboard auth IS the authorization.
+                      Removes one item from one deletion collection, like the link
+                      flow. Deliberately NOT under /keep: the /keep path has a
+                      Cloudflare Access bypass (for public email links), so a keep
+                      that relies on dashboard auth must sit on a protected path.
   GET /healthz        Liveness, open.
 
 Nothing here deletes media or mutates anything except the single keep action.
@@ -19,7 +25,7 @@ import hmac
 import logging
 from datetime import date, datetime
 
-from flask import Flask, Response, render_template_string, request
+from flask import Flask, Response, redirect, render_template_string, request
 
 from . import config, tokens
 from .jellyseerr import JellyseerrClient
@@ -71,6 +77,58 @@ def _require_dashboard_auth():
     )
 
 
+def _dashboard_actor() -> str:
+    """Best-effort identity for a keep performed from the (authenticated)
+    dashboard, recorded in the keep log. The Basic-auth user if we have one,
+    otherwise a generic marker (e.g. behind Cloudflare Access)."""
+    header = request.headers.get("Authorization", "")
+    if header.startswith("Basic "):
+        try:
+            user = base64.b64decode(header[6:]).decode("utf-8").partition(":")[0]
+            if user:
+                return f"{user} (dashboard)"
+        except (binascii.Error, UnicodeDecodeError):
+            pass
+    return "dashboard"
+
+
+# ---------------------------------------------------------------------------
+# Shared keep flow (used by both the token link and the dashboard button)
+# ---------------------------------------------------------------------------
+
+def _perform_keep(collection_id: int, media_id: str, email: str | None, via: str):
+    """Confirm the item is still queued, remove it from Maintainerr, and record
+    the keep. Returns one of 'already' | 'done' | 'error' plus the item title."""
+    maintainerr = MaintainerrClient()
+    title = None
+    still_queued = False
+    try:
+        for it in maintainerr.scheduled_items():
+            if it.media_server_id == media_id and it.collection_id == collection_id:
+                title, still_queued = it.title, True
+                break
+    except Exception as e:
+        log.warning("keep: lookup failed: %s", e)
+
+    if not still_queued:
+        return "already", title
+
+    ok = maintainerr.remove_media(collection_id, media_id)
+    log.info("keep %s (collection %s) by %s via %s -> %s",
+             media_id, collection_id, email or "unknown", via,
+             "ok" if ok else "FAILED")
+    if ok:
+        store = Store(config.DB_PATH)
+        try:
+            store.record_keep(email, media_id, title, collection_id,
+                              datetime.now().isoformat(timespec="seconds"))
+        except Exception as e:
+            log.warning("failed to record keep event: %s", e)
+        finally:
+            store.close()
+    return ("done" if ok else "error"), title
+
+
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
@@ -85,35 +143,33 @@ def keep():
     data = tokens.verify(config.SIGNING_SECRET, request.args.get("token", ""))
     if not data:
         return render_template_string(_KEEP_INVALID), 400
-    maintainerr = MaintainerrClient()
-    # Look the item up first so we can name it and know if it's still queued.
-    title = None
-    still_queued = False
-    try:
-        for it in maintainerr.scheduled_items():
-            if it.media_server_id == data["media_id"] and it.collection_id == data["collection_id"]:
-                title, still_queued = it.title, True
-                break
-    except Exception as e:
-        log.warning("keep: lookup failed: %s", e)
-
-    if not still_queued:
+    status, title = _perform_keep(
+        data["collection_id"], data["media_id"], data.get("email"), "link")
+    if status == "already":
         return render_template_string(_KEEP_ALREADY)
+    tmpl = _KEEP_DONE if status == "done" else _KEEP_ERROR
+    return render_template_string(tmpl, title=title or "This title")
 
-    ok = maintainerr.remove_media(data["collection_id"], data["media_id"])
-    log.info("keep %s (collection %s) by %s via link -> %s",
-             data["media_id"], data["collection_id"], data.get("email") or "unknown",
-             "ok" if ok else "FAILED")
-    if ok:
-        store = Store(config.DB_PATH)
-        try:
-            store.record_keep(data.get("email"), data["media_id"], title,
-                              data["collection_id"], datetime.now().isoformat(timespec="seconds"))
-        except Exception as e:
-            log.warning("failed to record keep event: %s", e)
-        finally:
-            store.close()
-    return render_template_string(_KEEP_DONE if ok else _KEEP_ERROR, title=title or "This title")
+
+@app.post("/dashboard/keep")
+def keep_from_dashboard():
+    """Keep an item straight from the dashboard. Same auth as the dashboard
+    itself; no token needed. Lives OFF the /keep path on purpose — /keep has a
+    Cloudflare Access bypass for public email links, so a keep gated only by
+    dashboard auth must not share it. Redirects back to the dashboard
+    (POST/redirect/GET) so a refresh doesn't resubmit."""
+    guard = _require_dashboard_auth()
+    if guard is not None:
+        return guard
+    media_id = request.form.get("media_id", "")
+    try:
+        collection_id = int(request.form.get("collection_id", ""))
+    except ValueError:
+        return Response("bad request", 400)
+    if not media_id:
+        return Response("bad request", 400)
+    _perform_keep(collection_id, media_id, _dashboard_actor(), "dashboard")
+    return redirect("/")
 
 
 @app.get("/")
@@ -179,12 +235,15 @@ _PAGE = """
   th{font-size:.75rem;text-transform:uppercase;letter-spacing:.04em;color:#71717a}
   .soon{color:#dc2626;font-weight:700}.ok{color:#16a34a;font-weight:600}
   .pill{display:inline-block;background:#8882;border-radius:999px;padding:.05rem .5rem;font-size:.8rem;margin:.1rem}
+  .btn{display:inline-block;background:#2563eb;color:#fff;border:0;border-radius:8px;
+       padding:.45rem .9rem;font-size:.9rem;font-weight:600;cursor:pointer}
+  .btn:hover{background:#1d4ed8}
 </style>
 """
 
 _DASHBOARD = _PAGE.replace("{{ title_tag }}", "sendoff — leaving soon") + """
 <h1 style="margin:.2rem 0">Leaving soon{% if dry_run %} <span class="pill">DRY_RUN</span>{% endif %}</h1>
-<p class="muted">Read-only. {{ items|length }} item(s) scheduled for deletion from {{ server_name }}. Marking &amp; deletion happen in Maintainerr.</p>
+<p class="muted">{{ items|length }} item(s) scheduled for deletion from {{ server_name }}. Keep an item to stop its deletion; marking &amp; deletion otherwise happen in Maintainerr.</p>
 {% if error %}<div class="card"><b>Could not load:</b> {{ error }}</div>{% endif %}
 {% if not items and not error %}<div class="card">Nothing is scheduled for deletion right now.</div>{% endif %}
 {% for it in items %}
@@ -213,6 +272,12 @@ _DASHBOARD = _PAGE.replace("{{ title_tag }}", "sendoff — leaving soon") + """
       {% endfor %}{% else %}<span class="muted">none in the lookback window</span>{% endif %}
     </td></tr>
   </table>
+  <form method="post" action="/dashboard/keep" style="margin-top:.8rem"
+        onsubmit="return confirm('Keep this title and stop its deletion?')">
+    <input type="hidden" name="collection_id" value="{{ it.collection_id }}">
+    <input type="hidden" name="media_id" value="{{ it.media_server_id }}">
+    <button class="btn" type="submit">Keep this</button>
+  </form>
   </div>
 </div>
 {% endfor %}

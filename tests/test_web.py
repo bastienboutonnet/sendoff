@@ -110,7 +110,33 @@ def main():
     assert FakeMaintainerr.removed == []
     print("ok  /keep for absent item -> Nothing to do, no removal")
 
-    print("\n9/9 web tests passed")
+    # dashboard renders a Keep button carrying the item's collection + media ids
+    config.DASHBOARD_USER = "admin"
+    config.DASHBOARD_PASSWORD = "hunter2"
+    config.TRUST_PROXY_AUTH = False
+    dash = c.get("/", headers=_basic("admin", "hunter2")).data
+    assert b'action="/dashboard/keep"' in dash and b'name="media_id" value="jf-1"' in dash
+    assert b'name="collection_id" value="3"' in dash
+    print("ok  dashboard renders a Keep button per item")
+
+    # POST /dashboard/keep is auth-gated: unauthenticated is rejected, no removal
+    FakeMaintainerr.removed.clear()
+    assert c.post("/dashboard/keep", data={"collection_id": "3", "media_id": "jf-1"}).status_code == 401
+    assert FakeMaintainerr.removed == []
+    print("ok  POST /dashboard/keep unauthenticated -> 401, no removal")
+
+    # POST /dashboard/keep authed -> removes item, records keep, redirects back to /
+    r = c.post("/dashboard/keep", data={"collection_id": "3", "media_id": "jf-1"},
+               headers=_basic("admin", "hunter2"))
+    assert r.status_code == 302 and r.headers["Location"].endswith("/")
+    assert FakeMaintainerr.removed == [(3, "jf-1")], FakeMaintainerr.removed
+    config.TRUST_PROXY_AUTH = True
+    dash = c.get("/").data
+    config.TRUST_PROXY_AUTH = False
+    assert b"admin (dashboard)" in dash, dash[:200]
+    print("ok  POST /keep authed -> removes, records keep (admin), redirects")
+
+    print("\n13/13 web tests passed")
 
 
 if __name__ == "__main__":

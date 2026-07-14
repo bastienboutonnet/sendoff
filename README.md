@@ -78,10 +78,14 @@ entirely, so any Cloudflare Access policy on Maintainerr is irrelevant to
 
 - **Dashboard (`/`)** — for you. Put **Cloudflare Access** in front of it
   (`TRUST_PROXY_AUTH=true`) and/or set `DASHBOARD_USER`/`DASHBOARD_PASSWORD`.
-  With neither set it returns 503 rather than exposing itself.
+  With neither set it returns 503 rather than exposing itself. Each queued item
+  has a **Keep** button that posts to `POST /dashboard/keep` — same auth as the
+  dashboard, no token. It sits *off* the `/keep` path on purpose (see below).
 - **`/keep`** — for end users, who have no Access accounts, so it **must not**
   sit behind a login wall. Add a Cloudflare Access **bypass/public rule for the
-  `/keep` path**. It's protected instead by unforgeable HMAC tokens scoped to one
+  `/keep` path** — scope it to `/keep` **only**, not a broad prefix, so it does
+  not also expose `/dashboard/keep` (whose sole guard is the dashboard auth).
+  `/keep` is protected instead by unforgeable HMAC tokens scoped to one
   (item, collection) and expiring one day after the deletion date.
 
 ## Tests

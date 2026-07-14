@@ -264,6 +264,8 @@ class ItemView:
     size_bytes: Optional[int]
     requester_email: Optional[str]
     requester_name: Optional[str]
+    collection_id: int                    # needed to keep (reprieve) from the dashboard
+    media_server_id: str                  # Jellyfin item id -> keep target
     poster: Optional[str] = None          # TMDB cover URL from Maintainerr's image_path
     watchers: list[WatcherView] = field(default_factory=list)
 
@@ -311,6 +313,8 @@ def build_dashboard(maintainerr, seerr, stat, today: Optional[date] = None) -> l
             size_bytes=None,
             requester_email=req_email,
             requester_name=req_name,
+            collection_id=item.collection_id,
+            media_server_id=item.media_server_id,
             poster=(item.image_path if str(item.image_path or "").startswith("http") else None),
             watchers=watchers,
         ))
