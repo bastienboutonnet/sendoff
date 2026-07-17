@@ -267,6 +267,100 @@ def test_run_once_batches_dryrun_and_ratelimit():
          config.NOTIFY_WATCHERS, config.DIGEST_HOUR, config.DIGEST_MINUTE, notify.send_email) = saved
 
 
+def test_store_deletions():
+    with tempfile.TemporaryDirectory() as d:
+        s = Store(os.path.join(d, "t.db"))
+        assert s.unreported_deletions() == []
+        s.record_deletion("m1", "Dune", "movie", "2026-07-10", "2026-07-13T09:00:00")
+        s.record_deletion("m2", "Severance", "show", "2026-07-11", "2026-07-13T09:05:00")
+        new = s.unreported_deletions()
+        assert [r["title"] for r in new] == ["Dune", "Severance"]    # oldest-first by removed_at
+        # An older removal falls outside a 30-day window (ISO string compare).
+        s.record_deletion("m0", "Old", "movie", "2026-05-01", "2026-05-01T09:00:00")
+        recent = s.recent_deletions("2026-06-13")
+        assert {r["title"] for r in recent} == {"Dune", "Severance"}  # 'Old' excluded
+        assert recent[0]["removed_at"] >= recent[-1]["removed_at"]    # newest-first
+        # Marking everything reported empties the unreported set.
+        s.mark_deletions_reported([r["id"] for r in s.unreported_deletions()], "2026-07-13T09:10:00")
+        assert s.unreported_deletions() == []
+        print("ok  store deletions: record, unreported (oldest-first), window, mark reported")
+
+
+def test_store_migrates_items_media_type():
+    import sqlite3
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "t.db")
+        # Simulate a DB from before media_type existed on the items table.
+        c = sqlite3.connect(path)
+        c.execute("CREATE TABLE items (media_server_id TEXT PRIMARY KEY, title TEXT, "
+                  "deletion_date TEXT, last_seen TEXT)")
+        c.execute("INSERT INTO items VALUES ('m1','Dune','2026-07-10','2026-07-01T00:00:00')")
+        c.commit(); c.close()
+        s = Store(path)   # opening runs the migration
+        cols = {r["name"] for r in s.db.execute("PRAGMA table_info(items)")}
+        assert "media_type" in cols                        # column added, row preserved
+        s.upsert_item("m1", "Dune", "movie", "2026-07-10", "2026-07-13T00:00:00")
+        row = s.db.execute("SELECT media_type FROM items WHERE media_server_id='m1'").fetchone()
+        assert row["media_type"] == "movie"
+        print("ok  store migrates old items table (adds media_type)")
+
+
+def test_run_once_deletion_digest():
+    it = _item(0, title="Dune", tmdb=1)   # deletion date == TODAY
+
+    class FM:
+        items = [it]
+        def scheduled_items(self):
+            return self.items
+
+    sent = []
+    saved = (config.DRY_RUN, config.NOTIFY_REQUESTER, config.NOTIFY_WATCHERS,
+             config.NOTIFY_ON_REMOVAL, config.DELETION_DIGEST_TO, config.DELETION_DIGEST_DAYS,
+             config.DIGEST_HOUR, config.DIGEST_MINUTE, notify.send_email)
+    try:
+        config.DRY_RUN = False
+        config.NOTIFY_REQUESTER = False       # isolate: no "leaving" emails this test
+        config.NOTIFY_WATCHERS = False
+        config.NOTIFY_ON_REMOVAL = False      # deletion recording must NOT depend on this
+        config.DELETION_DIGEST_TO = "admin@x.com"
+        config.DELETION_DIGEST_DAYS = 30
+        config.DIGEST_HOUR = 9
+        config.DIGEST_MINUTE = 0
+        notify.send_email = lambda to, subject, text, html=None: (
+            sent.append((to, subject, text, html)) or True)
+        now = datetime(2026, 7, 13, 9, 0, 0)   # 09:00 == DIGEST_HOUR -> eligible
+        with tempfile.TemporaryDirectory() as d:
+            s = Store(os.path.join(d, "t.db"))
+            fm = FM()
+
+            # Cycle 1: item present -> tracked, nothing removed yet.
+            r1 = run_once(s, fm, _FakeSeerr(), _FakeStat(), today=TODAY, now=now)
+            assert r1.deletion_digest_sent == 0 and sent == []
+
+            # Cycle 2: item gone AND its date has passed -> recorded + digest sent.
+            fm.items = []
+            r2 = run_once(s, fm, _FakeSeerr(), _FakeStat(), today=TODAY, now=now)
+            assert r2.deletion_digest_sent == 1, r2
+            assert len(sent) == 1
+            to, subject, text, html = sent[0]
+            assert to == "admin@x.com"
+            assert "removed from" in subject and "Dune" in text
+            assert "last 30 days" in text and "Dune" in html
+
+            # Cycle 3: same day, nothing new -> capped at one/day, no second email.
+            r3 = run_once(s, fm, _FakeSeerr(), _FakeStat(), today=TODAY, now=now)
+            assert r3.deletion_digest_sent == 0 and len(sent) == 1
+
+            # The deletion is on the ledger, now marked reported.
+            assert len(s.recent_deletions("2000-01-01")) == 1
+            assert s.unreported_deletions() == []
+        print("ok  run_once: records deletions + sends daily admin digest once")
+    finally:
+        (config.DRY_RUN, config.NOTIFY_REQUESTER, config.NOTIFY_WATCHERS,
+         config.NOTIFY_ON_REMOVAL, config.DELETION_DIGEST_TO, config.DELETION_DIGEST_DAYS,
+         config.DIGEST_HOUR, config.DIGEST_MINUTE, notify.send_email) = saved
+
+
 def test_from_header():
     from sendoff import mail
     saved = (config.EMAIL_FROM, config.SENDER_NAME, config.SMTP_USER)

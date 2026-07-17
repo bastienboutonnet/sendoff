@@ -50,6 +50,13 @@ NOTIFY_REQUESTER = _bool("NOTIFY_REQUESTER", True)   # the Jellyseerr requester
 NOTIFY_WATCHERS = _bool("NOTIFY_WATCHERS", True)     # recent watchers (Jellystat)
 # Optional admin address that always gets a copy / the error digest.
 ADMIN_EMAIL = os.environ.get("ADMIN_EMAIL", "").strip()
+# Admin deletion digest: when this is set, sendoff emails a daily summary of the
+# titles it confirmed deleted — sent only on days something was actually removed,
+# held until DIGEST_HOUR:DIGEST_MINUTE, at most one per day — plus a rolling list
+# of everything deleted in the last DELETION_DIGEST_DAYS. Empty = disabled; falls
+# back to ADMIN_EMAIL so the existing knob works on its own.
+DELETION_DIGEST_TO = os.environ.get("DELETION_DIGEST_TO", "").strip() or ADMIN_EMAIL
+DELETION_DIGEST_DAYS = _int("DELETION_DIGEST_DAYS", 30)
 
 # --- Timing ------------------------------------------------------------------
 # 0 (default) = notify IMMEDIATELY when a title is marked, announcing the full

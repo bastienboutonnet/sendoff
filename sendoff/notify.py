@@ -243,6 +243,68 @@ def compose_digest(entries, recipient: Recipient, today: date) -> tuple[str, str
     return subject, text, html_body
 
 
+def _deletion_when(removed_at: Optional[str]) -> str:
+    """Human 'D Mon YYYY' for a removal timestamp; best-effort on odd values."""
+    if not removed_at:
+        return ""
+    try:
+        return datetime.fromisoformat(removed_at).strftime("%-d %b %Y")
+    except ValueError:
+        return removed_at[:10]
+
+
+def compose_deletion_digest(new_rows, window_rows, today: date,
+                            window_days: int) -> tuple[str, str, str]:
+    """Admin summary email: what was just confirmed deleted (`new_rows`), plus a
+    rolling list of everything deleted in the last `window_days` (`window_rows`).
+    Both are `deletions` rows (title, media_type, removed_at)."""
+    server = config.SERVER_NAME
+    n = len(new_rows)
+    plural = "s" if n != 1 else ""
+    subject = f"{n} title{plural} removed from {server}"
+
+    def text_line(row) -> str:
+        title = row["title"] or "(unknown title)"
+        kind = _friendly_type(row["media_type"] or "")
+        when = _deletion_when(row["removed_at"])
+        return f"• {title} ({kind})" + (f" — removed {when}" if when else "")
+
+    lines = [f"{n} title{plural} removed from {server} since the last digest:", ""]
+    lines += [text_line(r) for r in new_rows]
+    lines += ["", f"Deleted in the last {window_days} days ({len(window_rows)}):"]
+    lines += [text_line(r) for r in window_rows] if window_rows else ["  (none)"]
+    lines += ["", f"— {config.SENDER_NAME}"]
+    text = "\n".join(lines)
+
+    def html_items(rows) -> str:
+        out = []
+        for row in rows:
+            title = html.escape(row["title"] or "(unknown title)")
+            kind = html.escape(_friendly_type(row["media_type"] or ""))
+            when = _deletion_when(row["removed_at"])
+            meta = f" · removed {html.escape(when)}" if when else ""
+            out.append(
+                '<li style="margin:0 0 6px;font-size:14px;line-height:1.4">'
+                f'<strong>{title}</strong> '
+                f'<span style="color:#71717a">({kind}){meta}</span></li>'
+            )
+        return "".join(out) or '<li style="color:#71717a">(none)</li>'
+
+    html_body = (
+        '<div style="font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;'
+        'max-width:540px;margin:0 auto;color:#1a1a1a">'
+        f'<h2 style="font-size:18px;margin:0 0 6px">{n} title{plural} removed from {html.escape(server)}</h2>'
+        '<p style="font-size:14px;color:#444;margin:0 0 8px">Confirmed deleted since the last digest:</p>'
+        f'<ul style="padding-left:18px;margin:0 0 20px">{html_items(new_rows)}</ul>'
+        f'<h3 style="font-size:15px;margin:0 0 6px">Deleted in the last {window_days} days '
+        f'<span style="color:#71717a;font-weight:400">({len(window_rows)})</span></h3>'
+        f'<ul style="padding-left:18px;margin:0 0 16px">{html_items(window_rows)}</ul>'
+        f'<p style="font-size:13px;color:#71717a;margin:0">— {html.escape(config.SENDER_NAME)}</p>'
+        '</div>'
+    )
+    return subject, text, html_body
+
+
 # ---------------------------------------------------------------------------
 # Dashboard view model (read-only)
 # ---------------------------------------------------------------------------
@@ -336,6 +398,7 @@ class RunSummary:
     no_recipients: int = 0
     batched_waiting: int = 0  # recipients holding for their next batch window
     removed_notifications: int = 0
+    deletion_digest_sent: int = 0  # 1 if the admin deletion digest went out this cycle
 
     def __str__(self) -> str:
         extra = ""
@@ -343,6 +406,8 @@ class RunSummary:
             extra += f", {self.batched_waiting} waiting for batch window"
         if self.removed_notifications:
             extra += f", {self.removed_notifications} removal notices"
+        if self.deletion_digest_sent:
+            extra += ", deletion digest sent"
         return (f"{self.scheduled} scheduled, {self.due} due, {self.sent} email(s) sent"
                 f" covering {self.titles_sent} title(s)"
                 f" ({self.skipped_dupes} already-sent, {self.no_recipients} no-recipient){extra}")
@@ -381,7 +446,7 @@ def run_once(store, maintainerr, seerr, stat,
     # Track present items for removal detection (skip all writes in DRY_RUN).
     if not config.DRY_RUN:
         for item in items:
-            store.upsert_item(item.media_server_id, item.title,
+            store.upsert_item(item.media_server_id, item.title, item.media_type,
                               item.deletion_date.isoformat(), now_iso)
 
     # One batched digest per recipient per calendar day, held until DIGEST_HOUR.
@@ -414,8 +479,14 @@ def run_once(store, maintainerr, seerr, stat,
         summary.sent += 1
         summary.titles_sent += len(entries)
 
-    # Optional removal confirmations for items that have disappeared.
-    if config.NOTIFY_ON_REMOVAL and not config.DRY_RUN:
+    # Reconcile items that have disappeared. A "removed" one (gone AND its date
+    # has passed) is a real deletion: record it in the ledger and, if configured,
+    # tell the people we warned. A "reprieved"/"unknown" one just stops being
+    # tracked. We run this whenever we either send removal notices OR keep the
+    # deletion ledger for the admin digest — recording is independent of the
+    # per-user notice toggle.
+    deletion_digest_on = bool(config.DELETION_DIGEST_TO)
+    if not config.DRY_RUN and (config.NOTIFY_ON_REMOVAL or deletion_digest_on):
         for row in store.all_items():
             msid = row["media_server_id"]
             if msid in present_ids:
@@ -429,8 +500,17 @@ def run_once(store, maintainerr, seerr, stat,
             if classify_disappeared(del_date, today) != "removed":
                 store.delete_item(msid)   # reprieved / unknown -> stop tracking, don't notify
                 continue
-            summary.removed_notifications += _notify_removed(store, row, now_iso)
+            if deletion_digest_on:
+                store.record_deletion(msid, row["title"], row["media_type"],
+                                      row["deletion_date"], now_iso)
+            if config.NOTIFY_ON_REMOVAL:
+                summary.removed_notifications += _notify_removed(store, row, now_iso)
             store.delete_item(msid)
+
+    # Admin deletion digest: once a day, at/after the digest hour, only when new
+    # deletions have been recorded since the last one.
+    if not config.DRY_RUN and deletion_digest_on:
+        summary.deletion_digest_sent += _send_deletion_digest(store, today, now, now_iso)
 
     return summary
 
@@ -452,3 +532,36 @@ def _notify_removed(store, row, now_iso: str) -> int:
         store.record_notified(msid, email, "removed", stint, now_iso)
         sent += 1
     return sent
+
+
+def _send_deletion_digest(store, today: date, now: datetime, now_iso: str) -> int:
+    """Once-daily admin summary of confirmed deletions. Sends only when there are
+    deletions not yet reported, holds until the digest hour, and caps at one per
+    calendar day (via the recipients table's per-address send timestamp). Returns
+    1 if a digest was sent, else 0."""
+    to = config.DELETION_DIGEST_TO
+    if not to:
+        return 0
+    last = store.last_emailed(to)
+    if last:
+        try:
+            if datetime.fromisoformat(last).date() == today:
+                return 0     # already sent today's deletion digest
+        except ValueError:
+            pass
+    if (now.hour, now.minute) < (config.DIGEST_HOUR, config.DIGEST_MINUTE):
+        return 0             # hold until the daily digest time
+    new_rows = store.unreported_deletions()
+    if not new_rows:
+        return 0             # nothing new to report -> stay quiet
+    cutoff = (today - timedelta(days=config.DELETION_DIGEST_DAYS)).isoformat()
+    window_rows = store.recent_deletions(cutoff)
+    subject, text, html_body = compose_deletion_digest(
+        new_rows, window_rows, today, config.DELETION_DIGEST_DAYS)
+    if not send_email(to, subject, text, html_body):
+        log.warning("deletion digest to %s failed, will retry next cycle", to)
+        return 0
+    store.mark_deletions_reported([r["id"] for r in new_rows], now_iso)
+    store.set_last_emailed(to, now_iso)
+    log.info("deletion digest: emailed %s about %d newly-removed title(s)", to, len(new_rows))
+    return 1
