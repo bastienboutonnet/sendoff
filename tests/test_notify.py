@@ -361,6 +361,56 @@ def test_run_once_deletion_digest():
          config.DIGEST_HOUR, config.DIGEST_MINUTE, notify.send_email) = saved
 
 
+def test_resolve_recipients_skips_non_email():
+    from sendoff.notify import resolve_recipients, valid_email
+    from sendoff.jellyseerr import User
+    from sendoff.jellystat import Watch
+
+    # The validator: real addresses pass, usernames / empties / partials fail.
+    assert valid_email("fan@x.com") and valid_email("  a.b@sub.dom.io ")
+    assert not valid_email("bingus") and not valid_email("") and not valid_email(None)
+    assert not valid_email("a@b") and not valid_email("no domain@")
+
+    it = _item(5, title="Dune", tmdb=1)
+
+    class Seerr:
+        enabled = True
+        def __init__(self, req=None, watcher_user=None):
+            self._req, self._wu = req, watcher_user
+        def requester_email(self, tmdb):
+            return self._req
+        def users(self):
+            return []
+        def user_by_jellyfin_id(self, uid):
+            return self._wu
+        def user_by_jellyfin_username(self, n):
+            return None
+
+    class Stat:
+        def __init__(self, watchers=()):
+            self._w = list(watchers)
+        def recent_watchers(self, msid, today):
+            return self._w
+
+    saved = (config.NOTIFY_REQUESTER, config.NOTIFY_WATCHERS)
+    try:
+        # Requester whose "email" is really a username -> no recipient, no send.
+        config.NOTIFY_REQUESTER, config.NOTIFY_WATCHERS = True, False
+        assert resolve_recipients(it, Seerr(req="bingus"), Stat(), TODAY) == []
+        r = resolve_recipients(it, Seerr(req="fan@x.com"), Stat(), TODAY)
+        assert len(r) == 1 and r[0].email == "fan@x.com"
+
+        # Watcher whose Jellyseerr record carries the username as email -> skipped.
+        config.NOTIFY_REQUESTER, config.NOTIFY_WATCHERS = False, True
+        bingus = User(id=1, email="bingus", display_name="Bingus",
+                      jellyfin_user_id="u1", jellyfin_username="bingus")
+        stat = Stat([Watch(user_id="u1", user_name="bingus", watched_on=TODAY)])
+        assert resolve_recipients(it, Seerr(watcher_user=bingus), stat, TODAY) == []
+    finally:
+        (config.NOTIFY_REQUESTER, config.NOTIFY_WATCHERS) = saved
+    print("ok  resolve_recipients skips empty / username-as-email addresses")
+
+
 def test_from_header():
     from sendoff import mail
     saved = (config.EMAIL_FROM, config.SENDER_NAME, config.SMTP_USER)

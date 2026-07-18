@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import html
 import logging
+import re
 import time
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
@@ -57,6 +58,18 @@ class Recipient:
     name: Optional[str] = None
 
 
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+def valid_email(value: Optional[str]) -> bool:
+    """A pragmatic 'looks like a real address' check. Jellyseerr hands back the
+    plain username in the email field for Jellyfin users who never set one (e.g.
+    'bingus'), and SMTP servers reject those as not fully-qualified — which just
+    fails every poll forever. Treat anything without a local@domain.tld shape (or
+    empty) as no-address so we never queue a doomed send."""
+    return bool(value and _EMAIL_RE.match(value.strip()))
+
+
 def resolve_recipients(item: ScheduledItem, seerr, stat, today: date) -> list[Recipient]:
     """Who should hear that `item` is leaving: the requester (Jellyseerr) and
     recent watchers (Jellystat -> Jellyseerr email). De-duplicated by email;
@@ -69,8 +82,10 @@ def resolve_recipients(item: ScheduledItem, seerr, stat, today: date) -> list[Re
         except Exception as e:
             log.warning("requester lookup failed for %r: %s", item.title, e)
             email = None
-        if email:
-            by_email[email.lower()] = Recipient(email=email, role="requester")
+        if valid_email(email):
+            by_email[email.strip().lower()] = Recipient(email=email.strip(), role="requester")
+        elif email:
+            log.debug("skipping requester with non-email address %r for %r", email, item.title)
 
     if config.NOTIFY_WATCHERS and stat is not None and seerr is not None:
         try:
@@ -85,8 +100,11 @@ def resolve_recipients(item: ScheduledItem, seerr, stat, today: date) -> list[Re
             if user is None and w.user_name:
                 user = seerr.user_by_jellyfin_username(w.user_name)
             email = user.email if user else None
-            if not email:
+            if not valid_email(email):
+                if email:
+                    log.debug("skipping watcher with non-email address %r for %r", email, item.title)
                 continue
+            email = email.strip()
             key = email.lower()
             if key in by_email:      # already a requester -> keep that role
                 continue
